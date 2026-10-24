@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
 <meta name="theme-color" content="#f2f2f0" />
-<title>DON'T TAP — Prototype V4</title>
+<title>DON'T TAP — V9 Playtest</title>
 <style>
   :root{
     --bg:#f2f2f0;
@@ -129,13 +129,16 @@
 <main id="game" aria-label="Don't Tap prototype">
   <div id="fill"></div>
   <div id="score">0</div>
-  <div id="commandWrap"><div id="command">TAP</div></div>
+  <div id="commandWrap"><div id="bestGhost" style="position:absolute;top:62px;left:0;right:0;text-align:center;font-size:11px;letter-spacing:.16em;opacity:0;transition:opacity .15s"></div><div id="command">TAP</div></div>
   <div id="hint">TAP / DON'T TAP</div>
 
   <section id="gameover">
     <div id="finalScore">0</div>
     <div id="failed">FAILED</div>
-    <div id="best">BEST 0</div>
+    <div id="deathDetail" style="font-size:14px;letter-spacing:.12em;min-height:20px;margin:8px 0 2px"></div><div id="best">BEST 0</div>
+<div id="playtestMeta" style="font-size:10px;letter-spacing:.12em;opacity:.38;margin-top:10px"></div>
+<button id="copyTestData" type="button" style="margin-top:14px;border:1px solid currentColor;background:transparent;color:inherit;padding:9px 13px;font:inherit;font-size:10px;letter-spacing:.14em;cursor:pointer">COPY TEST DATA</button>
+
     <div id="retry">TAP TO RETRY</div>
   </section>
 </main>
@@ -149,218 +152,708 @@
   const over = document.querySelector('#gameover');
   const finalScore = document.querySelector('#finalScore');
   const bestEl = document.querySelector('#best');
+  const deathDetail = document.querySelector('#deathDetail');
+  const bestGhost = document.querySelector('#bestGhost');
+  const copyTestData = document.querySelector('#copyTestData');
+  const playtestMeta = document.querySelector('#playtestMeta');
 
   /*
-    V3
-    TAP       -> tap any time before the timer ends.
-    DON'T TAP -> do nothing until its hidden, unpredictable timer ends; success automatically.
-    WAIT      -> do not tap while WAIT is shown. At a random point inside
-                 the same countdown it switches to TAP. Then tap before
-                 the remaining timer expires.
+    V9 — Local Playtest Build (V8 gameplay unchanged)
+    V7 mechanics/director remain intact. V8 adds:
+      • best-score proximity tension
+      • milestone micro-feedback
+      • NEW BEST moment
+      • X FROM BEST death feedback
+      • revenge-pattern memory
+      • near-zero-friction retry
+      • lightweight procedural WebAudio feedback
   */
 
-  const opening = [
-    ['TAP', 2000],
-    ['TAP', 2000],
-    ['DONT', 2000],
-    ['DONT', 1900],
-    ['TAP', 1900],
-    ['WAIT', 1900],
-    ['TAP', 1700],
-    ['TAP', 1500],
-    ['DONT', 1400],
-    ['WAIT', 1500],
-    ['TAP', 1300],
-    ['DONT', 1200],
-    ['WAIT', 1400]
-  ];
+  const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
+  const rand=(a,b)=>a+Math.random()*(b-a);
+  const choice=a=>a[Math.floor(Math.random()*a.length)];
 
-  let score = 0;
-  let best = Number(localStorage.getItem('dontTapBestV3') || 0);
-  let command = 'TAP';
-  let previousCommand = 'TAP';
-  let duration = 2000;
-  let start = 0;
-  let raf = 0;
-  let state = 'playing';
-  let waitSwitchAt = Infinity;
-  let waitHasSwitched = false;
-  let ignorePointerUntil = 0;
+  let score=0;
+  let best=Number(localStorage.getItem('dontTapBestV8')||0);
+  let runStartBest=best;
+  let state='playing';
+  let command='TAP';
+  let duration=1300;
+  let start=0;
+  let raf=0;
+  let runNumber=1;
 
-  function durationFor(s, cmd) {
-    if (s < opening.length) return opening[s][1];
+  let waitSwitchAt=Infinity;
+  let waitHasSwitched=false;
+  let waitTapStartedAt=0;
 
-    // DON'T TAP has no visible countdown and deliberately uses a wider,
-    // unpredictable duration range. The player cannot rhythm-count it.
-    if (cmd === 'DONT') {
-      if (s < 25) return 1200 + Math.random() * 800;   // 1.2–2.0s
-      if (s < 60) return 700 + Math.random() * 1100;   // 0.7–1.8s
-      return 400 + Math.random() * 1100;               // 0.4–1.5s
-    }
+  let ignorePointerUntil=0;
+  let failReason='';
+  let failDelta=null;
 
-    // TAP / WAIT keep the visible full-screen countdown.
-    let base;
-    if (s < 20) base = 1450;
-    else if (s < 35) base = 1250;
-    else if (s < 55) base = 1080;
-    else if (s < 80) base = 950;
-    else base = 850;
+  let queue=[];
+  let currentPattern=null;
+  let currentPatternStep=0;
+  let revengePattern=null;
+  let revengeEligibleAt=Infinity;
+  let newBestAnnounced=false;
 
-    return Math.max(700, base + Math.floor(Math.random() * 161) - 80);
+  // -------- V9 local telemetry --------
+  const TEST_KEY='dontTapV9Playtest';
+  const sessionId=(crypto?.randomUUID?.() || ('s_'+Date.now()+'_'+Math.random().toString(36).slice(2)));
+  const sessionStartedAt=new Date().toISOString();
+  let runId=1;
+  let runStartedAt=performance.now();
+  let roundIndex=0;
+  let currentRoundLog=null;
+  let lastDeathAt=null;
+  let totalRetries=0;
+
+  const telemetry={
+    schema:'dont-tap-playtest-v9',
+    version:1,
+    sessionId,
+    startedAt:sessionStartedAt,
+    userAgent:navigator.userAgent,
+    viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio||1},
+    runs:[],
+    rounds:[]
+  };
+
+  function safeLoadPrevious(){
+    try{
+      const raw=localStorage.getItem(TEST_KEY);
+      if(!raw)return [];
+      const parsed=JSON.parse(raw);
+      return Array.isArray(parsed)?parsed:[];
+    }catch{return [];}
   }
 
-  function commandFor(s) {
-    if (s < opening.length) return opening[s][0];
+  function persistTelemetry(finalize=false){
+    try{
+      const history=safeLoadPrevious().filter(s=>s.sessionId!==telemetry.sessionId);
+      const snapshot={
+        ...telemetry,
+        endedAt:finalize?new Date().toISOString():null,
+        summary:buildSummary()
+      };
+      history.push(snapshot);
+      localStorage.setItem(TEST_KEY,JSON.stringify(history.slice(-8)));
+    }catch{}
+  }
 
-    // WAIT becomes more common as score rises, but never dominates.
-    const r = Math.random();
-    let waitChance = s < 25 ? 0.20 : s < 50 ? 0.25 : 0.30;
-    let dontChance = 0.34;
+  function buildSummary(){
+    const completed=telemetry.rounds.filter(r=>r.result);
+    const successes=completed.filter(r=>r.result==='success');
+    const failures=completed.filter(r=>r.result==='fail');
+    const tapRTs=successes.filter(r=>r.command==='TAP'&&Number.isFinite(r.reactionTime)).map(r=>r.reactionTime);
+    const waitRTs=successes.filter(r=>r.command==='WAIT'&&Number.isFinite(r.reactionTime)).map(r=>r.reactionTime);
+    const runScores=telemetry.runs.map(r=>r.score).filter(Number.isFinite);
+    const failCounts={};
+    failures.forEach(r=>failCounts[r.failReason]=(failCounts[r.failReason]||0)+1);
+    const retryMs=telemetry.runs.map(r=>r.retryMs).filter(Number.isFinite);
 
-    let next;
-    if (r < waitChance) next = 'WAIT';
-    else if (r < waitChance + dontChance) next = 'DONT';
-    else next = 'TAP';
+    const med=a=>a.length?Math.round(median(a,0)):null;
+    return {
+      runs:telemetry.runs.length,
+      retries:totalRetries,
+      best:runScores.length?Math.max(...runScores):score,
+      averageScore:runScores.length?+(runScores.reduce((a,b)=>a+b,0)/runScores.length).toFixed(1):null,
+      medianTapRT:med(tapRTs),
+      medianWaitRT:med(waitRTs),
+      failures:failCounts,
+      medianRetryMs:med(retryMs),
+      rounds:completed.length
+    };
+  }
 
-    // Reduce long identical streaks without making alternation predictable.
-    if (next === previousCommand && Math.random() < 0.48) {
-      const alternatives = ['TAP','DONT','WAIT'].filter(x => x !== previousCommand);
-      next = alternatives[Math.floor(Math.random() * alternatives.length)];
+  function exportPayload(){
+    const current={
+      ...telemetry,
+      endedAt:new Date().toISOString(),
+      summary:buildSummary()
+    };
+    return JSON.stringify(current,null,2);
+  }
+
+  async function copyTelemetry(){
+    const text=exportPayload();
+    try{
+      await navigator.clipboard.writeText(text);
+      if(copyTestData){
+        const old=copyTestData.textContent;
+        copyTestData.textContent='COPIED';
+        setTimeout(()=>copyTestData.textContent=old,1100);
+      }
+    }catch{
+      const ta=document.createElement('textarea');
+      ta.value=text; document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); ta.remove();
     }
-    return next;
+  }
+
+  copyTestData?.addEventListener('pointerdown',e=>e.stopPropagation());
+  copyTestData?.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();copyTelemetry();});
+
+  const model={
+    tapRTs:[],
+    waitRTs:[],
+    recentResults:[],
+    pressure:.18,
+    failures:{earlyWait:0,dont:0,lateTap:0,lateWait:0}
+  };
+
+  const director={
+    phase:'warmup',
+    phaseRounds:0,
+    targetRounds:5,
+    tension:.10,
+    waitExpectationChain:0,
+    lastPatternName:''
+  };
+
+  // -------- audio --------
+  let audioCtx=null;
+  function audio() {
+    if(!audioCtx) {
+      const AC=window.AudioContext||window.webkitAudioContext;
+      if(AC) audioCtx=new AC();
+    }
+    if(audioCtx?.state==='suspended') audioCtx.resume();
+    return audioCtx;
+  }
+
+  function tone(freq,dur=.035,gain=.025,type='sine',delay=0) {
+    const ctx=audio();
+    if(!ctx) return;
+    const t=ctx.currentTime+delay;
+    const o=ctx.createOscillator();
+    const g=ctx.createGain();
+    o.type=type;
+    o.frequency.setValueAtTime(freq,t);
+    g.gain.setValueAtTime(0,t);
+    g.gain.linearRampToValueAtTime(gain,t+.004);
+    g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(t); o.stop(t+dur+.01);
+  }
+
+  function successSound(kind) {
+    const base=440+Math.min(score,100)*.75;
+    if(kind==='WAIT') tone(base+55,.032,.021,'sine');
+    else if(kind==='DONT') tone(base-80,.028,.014,'triangle');
+    else tone(base,.026,.018,'sine');
+  }
+
+  function milestoneSound() {
+    tone(560,.035,.022,'sine');
+    tone(690,.04,.018,'sine',.045);
+  }
+
+  function newBestSound() {
+    tone(610,.035,.022,'sine');
+    tone(760,.04,.020,'sine',.045);
+    tone(920,.05,.018,'sine',.09);
+  }
+
+  function failSound() {
+    tone(150,.09,.035,'square');
+  }
+
+  // -------- player model --------
+  function median(values,fallback) {
+    if(!values.length)return fallback;
+    const a=[...values].sort((x,y)=>x-y);
+    const m=Math.floor(a.length/2);
+    return a.length%2?a[m]:(a[m-1]+a[m])/2;
+  }
+
+  function pushRolling(arr,v,max=18) {
+    arr.push(v);
+    if(arr.length>max)arr.shift();
+  }
+
+  const tapRT=()=>clamp(median(model.tapRTs,390),260,650);
+  const waitRT=()=>clamp(median(model.waitRTs,tapRT()+25),280,700);
+
+  function successRate() {
+    return model.recentResults.length
+      ? model.recentResults.filter(Boolean).length/model.recentResults.length
+      : 1;
+  }
+
+  function updatePressure(success) {
+    pushRolling(model.recentResults,success,20);
+    if(score<6)return;
+    const rate=successRate();
+    if(rate>=.96)model.pressure+=.03;
+    else if(rate>=.90)model.pressure+=.012;
+    else if(rate<.78)model.pressure-=.055;
+    else if(rate<.85)model.pressure-=.025;
+    model.pressure+=score>25?.003:.0015;
+    model.pressure=clamp(model.pressure,0,1);
+  }
+
+  // -------- director --------
+  function resetDirector() {
+    director.phase='warmup';
+    director.phaseRounds=0;
+    director.targetRounds=runNumber===1?5:3;
+    director.tension=.10;
+    director.waitExpectationChain=0;
+    director.lastPatternName='';
+  }
+
+  function advanceDirector() {
+    director.phaseRounds++;
+    if(director.phaseRounds<director.targetRounds)return;
+    director.phaseRounds=0;
+
+    if(director.phase==='warmup'){
+      director.phase='build'; director.targetRounds=Math.floor(rand(3,6)); director.tension=.42;
+    } else if(director.phase==='build'){
+      director.phase='trap'; director.targetRounds=Math.floor(rand(2,4)); director.tension=.88;
+    } else if(director.phase==='trap'){
+      director.phase='relief'; director.targetRounds=Math.floor(rand(1,3)); director.tension=.20;
+    } else {
+      director.phase='build'; director.targetRounds=Math.floor(rand(3,6)); director.tension=.48;
+    }
+  }
+
+  function dominantWeakness() {
+    const f=model.failures;
+    const a=[['earlyWait',f.earlyWait],['dont',f.dont],['lateTap',f.lateTap],['lateWait',f.lateWait]]
+      .sort((x,y)=>y[1]-x[1]);
+    return a[0][1]>=2?a[0][0]:null;
+  }
+
+  const patternBank=[
+    {name:'momentum',tags:['dont'],seq:['TAP','TAP','TAP','TAP','DONT']},
+    {name:'momentum-short',tags:['dont'],seq:['TAP','TAP','TAP','DONT']},
+    {name:'freeze',tags:['lateTap'],seq:['DONT','DONT','DONT','TAP']},
+    {name:'freeze-short',tags:['lateTap'],seq:['DONT','DONT','TAP']},
+    {name:'switch',tags:['earlyWait'],seq:['TAP','DONT','WAIT','TAP']},
+    {name:'switch-2',tags:['earlyWait'],seq:['DONT','TAP','WAIT','DONT']},
+    {name:'mixed',tags:[],seq:['WAIT','TAP','DONT','TAP']},
+    {name:'mixed-2',tags:[],seq:['TAP','WAIT','TAP','DONT']},
+    {name:'mixed-3',tags:[],seq:['DONT','WAIT','TAP','TAP']},
+    {name:'activation',tags:['lateTap'],seq:['DONT','TAP','TAP','TAP','DONT']}
+  ];
+
+  function choosePattern() {
+    // Revenge patterns return later, never immediately after death.
+    if(revengePattern && score>=revengeEligibleAt && director.phase==='trap' && Math.random()<.48) {
+      currentPattern=revengePattern;
+      queue=[...revengePattern.seq];
+      currentPatternStep=0;
+      revengePattern=null;
+      return;
+    }
+
+    const weakness=dominantWeakness();
+    let pool=patternBank;
+
+    if(weakness&&Math.random()<.27&&director.phase==='trap'){
+      const targeted=patternBank.filter(p=>p.tags.includes(weakness));
+      if(targeted.length)pool=targeted;
+    }
+
+    if(director.phase==='relief'){
+      pool=patternBank.filter(p=>['mixed','mixed-2','mixed-3'].includes(p.name));
+    }
+
+    let p=choice(pool);
+    if(pool.length>1&&p.name===director.lastPatternName){
+      p=choice(pool.filter(x=>x.name!==director.lastPatternName));
+    }
+
+    director.lastPatternName=p.name;
+    currentPattern=p;
+    currentPatternStep=0;
+    queue=[...p.seq];
+  }
+
+  function openingCommand() {
+    const first=['TAP','TAP','DONT','TAP','WAIT','TAP'];
+    const retry=['TAP','DONT','TAP'];
+    const a=runNumber===1?first:retry;
+    return score<a.length?a[score]:null;
+  }
+
+  function nextCommand() {
+    const open=openingCommand();
+    if(open){ currentPattern=null; return open; }
+
+    if(director.phase==='trap'&&director.waitExpectationChain===0&&Math.random()<.18){
+      director.waitExpectationChain=4;
+      currentPattern={name:'expectation',tags:['earlyWait'],seq:['WAIT','WAIT','WAIT','WAIT']};
+      currentPatternStep=0;
+      queue=[...currentPattern.seq];
+    }
+
+    if(!queue.length)choosePattern();
+    currentPatternStep++;
+    return queue.shift();
+  }
+
+  // -------- timings --------
+  function tapDeadline() {
+    const rt=tapRT(), p=model.pressure, t=director.tension, r=Math.random();
+    let mult;
+
+    // Approaching the personal best increases perceived tension mostly through
+    // pattern/director behavior, not unfair deadline collapse.
+    const nearBest = runStartBest>=10 && score>=runStartBest-3;
+
+    if(director.phase==='relief'||r<.10)mult=rand(1.90,2.18);
+    else if(director.phase==='trap'&&r>.58)mult=rand(1.28,1.46);
+    else mult=rand(1.52-p*.10-t*.06,1.82-p*.10-t*.05);
+
+    if(nearBest) mult*=.98; // tiny, almost imperceptible pressure only
+    return clamp(rt*mult,470,1250);
+  }
+
+  function dontDuration() {
+    const t=director.tension,r=Math.random();
+    if(director.phase==='relief')return rand(820,1350);
+    if(r<.28)return rand(450,700-t*70);
+    if(r<.77)return rand(700,1200-t*100);
+    return rand(1200,1750-t*130);
+  }
+
+  function waitPlan() {
+    const rt=waitRT(),p=model.pressure;
+    let waitTime;
+
+    if(director.waitExpectationChain>0){
+      waitTime=director.waitExpectationChain===1?rand(1180,1500):rand(470,580);
+      director.waitExpectationChain--;
+    } else {
+      const r=Math.random();
+      waitTime=r<.30?rand(470,620):r<.80?rand(680,980):rand(1100,1480);
+    }
+
+    waitTime=Math.max(450,waitTime);
+
+    let mult;
+    if(director.phase==='relief')mult=rand(1.68,1.90);
+    else if(director.phase==='trap'&&Math.random()<.34)mult=rand(1.28,1.42);
+    else mult=rand(1.45-p*.10,1.68-p*.08);
+
+    return {waitTime,reactionWindow:clamp(rt*mult,400,850)};
   }
 
   function renderCommand() {
-    if (command === 'TAP') commandEl.textContent = 'TAP';
-    else if (command === 'DONT') commandEl.innerHTML = "DON'T<br>TAP";
-    else commandEl.textContent = 'WAIT';
+    if(command==='TAP')commandEl.textContent='TAP';
+    else if(command==='DONT')commandEl.innerHTML="DON'T<br>TAP";
+    else commandEl.textContent='WAIT';
   }
 
-  function setupWaitSwitch() {
-    waitHasSwitched = false;
-    waitSwitchAt = Infinity;
+  function setupTiming() {
+    waitHasSwitched=false;
+    waitSwitchAt=Infinity;
+    waitTapStartedAt=0;
 
-    if (command !== 'WAIT') return;
+    if(runNumber===1&&model.tapRTs.length<3&&command==='TAP'){
+      duration=[1450,1350,1250][model.tapRTs.length];
+      return;
+    }
 
-    // Switch unpredictably inside the round, but guarantee enough time to react.
-    // The later the score, the slightly tighter the possible remaining window.
-    const minRemaining = score < 25 ? 520 : score < 60 ? 450 : 390;
-    const earliest = Math.min(duration * 0.28, duration - minRemaining);
-    const latest = Math.max(earliest, duration - minRemaining);
+    if(command==='TAP')duration=tapDeadline();
+    else if(command==='DONT')duration=dontDuration();
+    else{
+      const plan=waitPlan();
+      waitSwitchAt=plan.waitTime;
+      duration=plan.waitTime+plan.reactionWindow;
+    }
+  }
 
-    waitSwitchAt = earliest + Math.random() * Math.max(0, latest - earliest);
+  // -------- run psychology --------
+  function updateBestGhost() {
+    if(!bestGhost)return;
+    if(runStartBest>=10 && score>=Math.max(1,runStartBest-5) && score<=runStartBest){
+      const gap=runStartBest-score;
+      bestGhost.textContent=gap===0?'BEST':'BEST '+runStartBest;
+      bestGhost.style.opacity=gap<=2?'0.42':'0.20';
+    } else {
+      bestGhost.textContent='';
+      bestGhost.style.opacity='0';
+    }
+  }
+
+  function pulseScore(scale=1.16,durationMs=150) {
+    scoreEl.animate(
+      [{transform:'scale(1)'},{transform:`scale(${scale})`},{transform:'scale(1)'}],
+      {duration:durationMs,easing:'ease-out'}
+    );
+  }
+
+  function runFeedbackAfterSuccess() {
+    const hitNewBest = score>runStartBest && runStartBest>0 && !newBestAnnounced;
+
+    if(hitNewBest){
+      newBestAnnounced=true;
+      pulseScore(1.28,220);
+      newBestSound();
+      if(navigator.vibrate)navigator.vibrate([12,30,12]);
+    } else if(score>0 && score%10===0){
+      pulseScore(1.18,170);
+      milestoneSound();
+      if(navigator.vibrate)navigator.vibrate([8,22,8]);
+    }
+    updateBestGhost();
+  }
+
+  
+  function beginRoundTelemetry(){
+    roundIndex++;
+    currentRoundLog={
+      sessionId,
+      runId,
+      round:roundIndex,
+      scoreBefore:score,
+      command,
+      pattern:currentPattern?.name || 'opening',
+      directorPhase:director.phase,
+      pressure:+model.pressure.toFixed(3),
+      duration:Math.round(duration),
+      waitDuration:command==='WAIT'?Math.round(waitSwitchAt):null,
+      startedAtMs:Math.round(performance.now()),
+      reactionTime:null,
+      elapsed:null,
+      result:null,
+      failReason:null,
+      failDelta:null
+    };
+    telemetry.rounds.push(currentRoundLog);
+  }
+
+  function finishRoundTelemetry(result,reactionMs=null){
+    if(!currentRoundLog || currentRoundLog.result)return;
+    currentRoundLog.result=result;
+    currentRoundLog.elapsed=Math.round(performance.now()-start);
+    if(Number.isFinite(reactionMs))currentRoundLog.reactionTime=Math.round(reactionMs);
+    if(result==='fail'){
+      currentRoundLog.failReason=failReason||'unknown';
+      currentRoundLog.failDelta=Number.isFinite(failDelta)?Math.round(failDelta):null;
+    }
+    persistTelemetry(false);
+  }
+
+  function closeRunTelemetry(){
+    const existing=telemetry.runs.find(r=>r.runId===runId);
+    if(existing)return;
+    telemetry.runs.push({
+      runId,
+      score,
+      bestAtRunStart:runStartBest,
+      durationMs:Math.round(performance.now()-runStartedAt),
+      deathReason:failReason||'unknown',
+      retryMs:null
+    });
   }
 
   function newRound() {
-    state = 'playing';
-    command = commandFor(score);
-    duration = durationFor(score, command);
-    previousCommand = command;
-
+    state='playing';
+    command=nextCommand();
+    setupTiming();
     renderCommand();
-    setupWaitSwitch();
-    scoreEl.textContent = score;
-    fill.style.height = '0%';
-    fill.style.opacity = command === 'DONT' ? '0' : '1';
 
-    start = performance.now();
+    scoreEl.textContent=score;
+    updateBestGhost();
+    fill.style.height='0%';
+    fill.style.opacity=command==='DONT'?'0':'1';
+
+    start=performance.now();
+    beginRoundTelemetry();
     cancelAnimationFrame(raf);
-    raf = requestAnimationFrame(tick);
+    raf=requestAnimationFrame(tick);
   }
 
   function tick(now) {
-    if (state !== 'playing') return;
+    if(state!=='playing')return;
+    const elapsed=now-start;
+    const progress=Math.min(1,elapsed/duration);
+    fill.style.height=(progress*100).toFixed(2)+'%';
 
-    const elapsed = now - start;
-    const progress = Math.min(1, elapsed / duration);
-    fill.style.height = (progress * 100).toFixed(2) + '%';
-
-    if (command === 'WAIT' && !waitHasSwitched && elapsed >= waitSwitchAt) {
-      waitHasSwitched = true;
-      commandEl.textContent = 'TAP';
-      if (navigator.vibrate) navigator.vibrate(10);
+    if(command==='WAIT'&&!waitHasSwitched&&elapsed>=waitSwitchAt){
+      waitHasSwitched=true;
+      waitTapStartedAt=now;
+      commandEl.textContent='TAP';
+      tone(520+Math.min(score,100)*.5,.025,.012,'sine');
+      if(navigator.vibrate)navigator.vibrate(10);
     }
 
-    if (progress >= 1) {
-      if (command === 'DONT') {
-        success();
-      } else {
-        // TAP not pressed, or WAIT->TAP was not answered.
+    if(progress>=1){
+      if(command==='DONT')succeed(null);
+      else{
+        failReason=command==='TAP'?'lateTap':'lateWait';
+        failDelta=Math.max(0,elapsed-duration);
         fail();
       }
       return;
     }
-
-    raf = requestAnimationFrame(tick);
+    raf=requestAnimationFrame(tick);
   }
 
-  function success() {
-    if (state !== 'playing') return;
+  function succeed(reactionMs) {
+    if(state!=='playing')return;
     cancelAnimationFrame(raf);
+
+    const completedCommand=command;
+    finishRoundTelemetry('success',reactionMs);
+    if(command==='TAP'&&Number.isFinite(reactionMs))pushRolling(model.tapRTs,reactionMs);
+    if(command==='WAIT'&&Number.isFinite(reactionMs))pushRolling(model.waitRTs,reactionMs);
+
+    updatePressure(true);
     score++;
-    scoreEl.textContent = score;
-    if (navigator.vibrate) navigator.vibrate(7);
+    successSound(completedCommand);
+    runFeedbackAfterSuccess();
+    advanceDirector();
+    if(navigator.vibrate)navigator.vibrate(7);
     newRound();
+  }
+
+  function recordFailure() {
+    if(failReason==='earlyWait')model.failures.earlyWait++;
+    else if(failReason==='dont')model.failures.dont++;
+    else if(failReason==='lateTap')model.failures.lateTap++;
+    else if(failReason==='lateWait')model.failures.lateWait++;
+  }
+
+  function primaryDeathText() {
+    if(failReason==='earlyWait'&&Number.isFinite(failDelta))return Math.round(failDelta)+'ms EARLY';
+    if((failReason==='lateTap'||failReason==='lateWait')&&Number.isFinite(failDelta))return Math.round(failDelta)+'ms LATE';
+    if(failReason==='dont')return 'YOU TAPPED.';
+    return 'FAILED';
+  }
+
+  function deathContext() {
+    if(score>runStartBest && runStartBest>0)return 'NEW BEST';
+    const gap=runStartBest-score;
+    if(runStartBest>0 && gap>0 && gap<=9)return gap+' FROM BEST';
+    return '';
   }
 
   function fail() {
-    if (state !== 'playing') return;
-    state = 'over';
+    if(state!=='playing')return;
+    state='over';
     cancelAnimationFrame(raf);
+    finishRoundTelemetry('fail',null);
+    closeRunTelemetry();
+    lastDeathAt=performance.now();
 
-    if (score > best) {
-      best = score;
-      localStorage.setItem('dontTapBestV3', String(best));
+    // Remember the trap that killed the player and offer it later as revenge.
+    if(currentPattern && currentPattern.seq && currentPattern.seq.length>=3){
+      revengePattern={...currentPattern,seq:[...currentPattern.seq]};
+      revengeEligibleAt=Math.floor(rand(10,19));
     }
 
-    if (navigator.vibrate) navigator.vibrate([35,35,60]);
+    recordFailure();
+    updatePressure(false);
 
-    finalScore.textContent = score;
-    bestEl.textContent = 'BEST ' + best;
-    over.style.display = 'flex';
-    ignorePointerUntil = performance.now() + 250;
+    if(score>best){
+      best=score;
+      localStorage.setItem('dontTapBestV8',String(best));
+    }
+
+    failSound();
+    if(navigator.vibrate)navigator.vibrate([35,35,60]);
+
+    finalScore.textContent=score;
+    if(deathDetail){
+      const primary=primaryDeathText();
+      const context=deathContext();
+      deathDetail.innerHTML=context
+        ? `${primary}<br><span style="font-size:11px;opacity:.55">${context}</span>`
+        : primary;
+    }
+    bestEl.textContent='BEST '+best;
+    if(playtestMeta){
+      const s=buildSummary();
+      playtestMeta.textContent=`TEST · ${s.runs} RUN${s.runs===1?'':'S'} · ${s.rounds} ROUNDS`;
+    }
+    if(bestGhost){bestGhost.textContent='';bestGhost.style.opacity='0';}
+    over.style.display='flex';
+    ignorePointerUntil=performance.now()+180;
   }
 
   function restart() {
-    score = 0;
-    command = 'TAP';
-    previousCommand = 'TAP';
-    over.style.display = 'none';
-    fill.style.height = '0%';
-    fill.style.opacity = '1';
-    newRound();
+    const retryMs=Number.isFinite(lastDeathAt)?Math.round(performance.now()-lastDeathAt):null;
+    const previousRun=telemetry.runs.find(r=>r.runId===runId);
+    if(previousRun)previousRun.retryMs=retryMs;
+    totalRetries++;
+    persistTelemetry(false);
+
+    score=0;
+    runNumber++;
+    runId++;
+    roundIndex=0;
+    runStartedAt=performance.now();
+    runStartBest=best;
+    newBestAnnounced=false;
+    queue=[];
+    currentPattern=null;
+    currentPatternStep=0;
+    failReason='';
+    failDelta=null;
+    model.recentResults=[];
+    model.pressure=clamp(model.pressure-.08,.08,1);
+    resetDirector();
+
+    if(deathDetail)deathDetail.textContent='';
+    over.style.display='none';
+    fill.style.height='0%';
+    fill.style.opacity='1';
+
+    // Fast restart: no countdown / ready screen.
+    requestAnimationFrame(newRound);
   }
 
-  game.addEventListener('pointerdown', (e) => {
+  game.addEventListener('pointerdown',e=>{
     e.preventDefault();
+    audio(); // unlock WebAudio on first user gesture
+    const now=performance.now();
 
-    if (state === 'over') {
-      if (performance.now() >= ignorePointerUntil) restart();
+    if(state==='over'){
+      if(now>=ignorePointerUntil)restart();
       return;
     }
 
-    if (command === 'TAP') {
-      success();
+    const elapsed=now-start;
+
+    if(command==='TAP'){
+      succeed(elapsed);
       return;
     }
 
-    if (command === 'DONT') {
+    if(command==='DONT'){
+      failReason='dont';
+      failDelta=null;
       fail();
       return;
     }
 
-    // WAIT: touching before it visually changes to TAP is a failure.
-    // Once switched, the same round is effectively a TAP round.
-    if (command === 'WAIT') {
-      if (waitHasSwitched) success();
-      else fail();
+    if(waitHasSwitched){
+      succeed(now-waitTapStartedAt);
+    } else {
+      failReason='earlyWait';
+      failDelta=Math.max(0,waitSwitchAt-elapsed);
+      fail();
     }
-  }, {passive:false});
+  },{passive:false});
 
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && state === 'playing') fail();
+  window.addEventListener('pagehide',()=>persistTelemetry(true));
+  document.addEventListener('visibilitychange',()=>{
+    if(document.hidden&&state==='playing'){
+      failReason='';
+      failDelta=null;
+      fail();
+    }
   });
 
+  runStartBest=best;
+  resetDirector();
   newRound();
 })();
 </script>
