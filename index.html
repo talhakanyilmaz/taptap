@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<meta name="theme-color" content="#f2f2f0" />
+<title>DON'T TAP — Prototype V4</title>
+<style>
+  :root{
+    --bg:#f2f2f0;
+    --timer:#c9c9c5;
+    --ink:#111111;
+    --muted:#777774;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#111}
+  body{
+    font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Display",
+      "Helvetica Neue", Arial, sans-serif;
+    -webkit-user-select:none; user-select:none;
+    -webkit-tap-highlight-color:transparent;
+    touch-action:manipulation;
+  }
+  #game{
+    position:fixed; inset:0;
+    background:var(--bg);
+    color:var(--ink);
+    overflow:hidden;
+    cursor:pointer;
+  }
+  #fill{
+    position:absolute;
+    z-index:0;
+    top:0; left:0; width:100%; height:0%;
+    background:var(--timer);
+    will-change:height, opacity;
+    transition:opacity .08s linear;
+  }
+  #score{
+    position:absolute;
+    z-index:2;
+    top:max(28px, calc(env(safe-area-inset-top) + 18px));
+    left:0; width:100%;
+    text-align:center;
+    font-size:clamp(22px, 5vw, 34px);
+    font-weight:500;
+    letter-spacing:.03em;
+    font-variant-numeric:tabular-nums;
+  }
+  #commandWrap{
+    position:absolute;
+    z-index:2;
+    inset:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    pointer-events:none;
+  }
+  #command{
+    text-align:center;
+    font-size:clamp(42px, 12vw, 78px);
+    line-height:.92;
+    font-weight:800;
+    letter-spacing:-.055em;
+  }
+  #hint{
+    position:absolute;
+    z-index:2;
+    bottom:max(28px, calc(env(safe-area-inset-bottom) + 18px));
+    left:0; width:100%;
+    text-align:center;
+    font-size:11px;
+    letter-spacing:.18em;
+    color:var(--muted);
+    opacity:0;
+    transition:opacity .15s ease;
+  }
+  #gameover{
+    position:absolute;
+    z-index:5;
+    inset:0;
+    display:none;
+    background:#111;
+    color:#f4f4f1;
+    align-items:center;
+    justify-content:center;
+    flex-direction:column;
+    text-align:center;
+  }
+  #finalScore{
+    font-size:clamp(80px, 25vw, 150px);
+    line-height:.8;
+    font-weight:800;
+    letter-spacing:-.07em;
+    margin-bottom:30px;
+  }
+  #failed{
+    font-size:13px;
+    font-weight:700;
+    letter-spacing:.24em;
+    margin-bottom:12px;
+  }
+  #best{
+    font-size:13px;
+    letter-spacing:.14em;
+    color:#92928e;
+  }
+  #retry{
+    position:absolute;
+    bottom:max(42px, calc(env(safe-area-inset-bottom) + 26px));
+    font-size:12px;
+    font-weight:700;
+    letter-spacing:.2em;
+    animation:pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse{50%{opacity:.35}}
+  @media (min-width:700px){
+    #game{
+      width:min(430px,100vw);
+      height:min(860px,100vh - 32px);
+      inset:50% auto auto 50%;
+      transform:translate(-50%,-50%);
+      border-radius:28px;
+    }
+  }
+</style>
+</head>
+<body>
+<main id="game" aria-label="Don't Tap prototype">
+  <div id="fill"></div>
+  <div id="score">0</div>
+  <div id="commandWrap"><div id="command">TAP</div></div>
+  <div id="hint">TAP / DON'T TAP</div>
+
+  <section id="gameover">
+    <div id="finalScore">0</div>
+    <div id="failed">FAILED</div>
+    <div id="best">BEST 0</div>
+    <div id="retry">TAP TO RETRY</div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const game = document.querySelector('#game');
+  const fill = document.querySelector('#fill');
+  const scoreEl = document.querySelector('#score');
+  const commandEl = document.querySelector('#command');
+  const over = document.querySelector('#gameover');
+  const finalScore = document.querySelector('#finalScore');
+  const bestEl = document.querySelector('#best');
+
+  /*
+    V3
+    TAP       -> tap any time before the timer ends.
+    DON'T TAP -> do nothing until its hidden, unpredictable timer ends; success automatically.
+    WAIT      -> do not tap while WAIT is shown. At a random point inside
+                 the same countdown it switches to TAP. Then tap before
+                 the remaining timer expires.
+  */
+
+  const opening = [
+    ['TAP', 2000],
+    ['TAP', 2000],
+    ['DONT', 2000],
+    ['DONT', 1900],
+    ['TAP', 1900],
+    ['WAIT', 1900],
+    ['TAP', 1700],
+    ['TAP', 1500],
+    ['DONT', 1400],
+    ['WAIT', 1500],
+    ['TAP', 1300],
+    ['DONT', 1200],
+    ['WAIT', 1400]
+  ];
+
+  let score = 0;
+  let best = Number(localStorage.getItem('dontTapBestV3') || 0);
+  let command = 'TAP';
+  let previousCommand = 'TAP';
+  let duration = 2000;
+  let start = 0;
+  let raf = 0;
+  let state = 'playing';
+  let waitSwitchAt = Infinity;
+  let waitHasSwitched = false;
+  let ignorePointerUntil = 0;
+
+  function durationFor(s, cmd) {
+    if (s < opening.length) return opening[s][1];
+
+    // DON'T TAP has no visible countdown and deliberately uses a wider,
+    // unpredictable duration range. The player cannot rhythm-count it.
+    if (cmd === 'DONT') {
+      if (s < 25) return 1200 + Math.random() * 800;   // 1.2–2.0s
+      if (s < 60) return 700 + Math.random() * 1100;   // 0.7–1.8s
+      return 400 + Math.random() * 1100;               // 0.4–1.5s
+    }
+
+    // TAP / WAIT keep the visible full-screen countdown.
+    let base;
+    if (s < 20) base = 1450;
+    else if (s < 35) base = 1250;
+    else if (s < 55) base = 1080;
+    else if (s < 80) base = 950;
+    else base = 850;
+
+    return Math.max(700, base + Math.floor(Math.random() * 161) - 80);
+  }
+
+  function commandFor(s) {
+    if (s < opening.length) return opening[s][0];
+
+    // WAIT becomes more common as score rises, but never dominates.
+    const r = Math.random();
+    let waitChance = s < 25 ? 0.20 : s < 50 ? 0.25 : 0.30;
+    let dontChance = 0.34;
+
+    let next;
+    if (r < waitChance) next = 'WAIT';
+    else if (r < waitChance + dontChance) next = 'DONT';
+    else next = 'TAP';
+
+    // Reduce long identical streaks without making alternation predictable.
+    if (next === previousCommand && Math.random() < 0.48) {
+      const alternatives = ['TAP','DONT','WAIT'].filter(x => x !== previousCommand);
+      next = alternatives[Math.floor(Math.random() * alternatives.length)];
+    }
+    return next;
+  }
+
+  function renderCommand() {
+    if (command === 'TAP') commandEl.textContent = 'TAP';
+    else if (command === 'DONT') commandEl.innerHTML = "DON'T<br>TAP";
+    else commandEl.textContent = 'WAIT';
+  }
+
+  function setupWaitSwitch() {
+    waitHasSwitched = false;
+    waitSwitchAt = Infinity;
+
+    if (command !== 'WAIT') return;
+
+    // Switch unpredictably inside the round, but guarantee enough time to react.
+    // The later the score, the slightly tighter the possible remaining window.
+    const minRemaining = score < 25 ? 520 : score < 60 ? 450 : 390;
+    const earliest = Math.min(duration * 0.28, duration - minRemaining);
+    const latest = Math.max(earliest, duration - minRemaining);
+
+    waitSwitchAt = earliest + Math.random() * Math.max(0, latest - earliest);
+  }
+
+  function newRound() {
+    state = 'playing';
+    command = commandFor(score);
+    duration = durationFor(score, command);
+    previousCommand = command;
+
+    renderCommand();
+    setupWaitSwitch();
+    scoreEl.textContent = score;
+    fill.style.height = '0%';
+    fill.style.opacity = command === 'DONT' ? '0' : '1';
+
+    start = performance.now();
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(tick);
+  }
+
+  function tick(now) {
+    if (state !== 'playing') return;
+
+    const elapsed = now - start;
+    const progress = Math.min(1, elapsed / duration);
+    fill.style.height = (progress * 100).toFixed(2) + '%';
+
+    if (command === 'WAIT' && !waitHasSwitched && elapsed >= waitSwitchAt) {
+      waitHasSwitched = true;
+      commandEl.textContent = 'TAP';
+      if (navigator.vibrate) navigator.vibrate(10);
+    }
+
+    if (progress >= 1) {
+      if (command === 'DONT') {
+        success();
+      } else {
+        // TAP not pressed, or WAIT->TAP was not answered.
+        fail();
+      }
+      return;
+    }
+
+    raf = requestAnimationFrame(tick);
+  }
+
+  function success() {
+    if (state !== 'playing') return;
+    cancelAnimationFrame(raf);
+    score++;
+    scoreEl.textContent = score;
+    if (navigator.vibrate) navigator.vibrate(7);
+    newRound();
+  }
+
+  function fail() {
+    if (state !== 'playing') return;
+    state = 'over';
+    cancelAnimationFrame(raf);
+
+    if (score > best) {
+      best = score;
+      localStorage.setItem('dontTapBestV3', String(best));
+    }
+
+    if (navigator.vibrate) navigator.vibrate([35,35,60]);
+
+    finalScore.textContent = score;
+    bestEl.textContent = 'BEST ' + best;
+    over.style.display = 'flex';
+    ignorePointerUntil = performance.now() + 250;
+  }
+
+  function restart() {
+    score = 0;
+    command = 'TAP';
+    previousCommand = 'TAP';
+    over.style.display = 'none';
+    fill.style.height = '0%';
+    fill.style.opacity = '1';
+    newRound();
+  }
+
+  game.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+
+    if (state === 'over') {
+      if (performance.now() >= ignorePointerUntil) restart();
+      return;
+    }
+
+    if (command === 'TAP') {
+      success();
+      return;
+    }
+
+    if (command === 'DONT') {
+      fail();
+      return;
+    }
+
+    // WAIT: touching before it visually changes to TAP is a failure.
+    // Once switched, the same round is effectively a TAP round.
+    if (command === 'WAIT') {
+      if (waitHasSwitched) success();
+      else fail();
+    }
+  }, {passive:false});
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && state === 'playing') fail();
+  });
+
+  newRound();
+})();
+</script>
+</body>
+</html>
