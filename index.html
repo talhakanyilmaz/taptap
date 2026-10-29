@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
 <meta name="theme-color" content="#f2f2f0" />
-<title>DON'T TAP — V9 Playtest</title>
+<title>DON'T TAP</title>
 <style>
   :root{
     --bg:#f2f2f0;
@@ -123,6 +123,9 @@
       border-radius:28px;
     }
   }
+
+#hapticToggle{position:absolute;right:12px;bottom:12px;z-index:40;border:0;background:transparent;color:#111;
+font:600 10px/1 -apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;letter-spacing:.07em;opacity:.4;padding:10px}
 </style>
 </head>
 <body>
@@ -136,13 +139,58 @@
     <div id="finalScore">0</div>
     <div id="failed">FAILED</div>
     <div id="deathDetail" style="font-size:14px;letter-spacing:.12em;min-height:20px;margin:8px 0 2px"></div><div id="best">BEST 0</div>
-<div id="playtestMeta" style="font-size:10px;letter-spacing:.12em;opacity:.38;margin-top:10px"></div>
-<button id="copyTestData" type="button" style="margin-top:14px;border:1px solid currentColor;background:transparent;color:inherit;padding:9px 13px;font:inherit;font-size:10px;letter-spacing:.14em;cursor:pointer">COPY TEST DATA</button>
+
+
 
     <div id="retry">TAP TO RETRY</div>
   </section>
 </main>
 
+<script src="https://www.youtube.com/game_api/v1"></script>
+
+<script>
+let ytAudioEnabled = true;
+let ytPaused = false;
+let ytLoaded = false;
+let ytSave = {version:1,best:0,haptics:true};
+
+async function ytLoadProgress(){
+  if(!window.ytgame?.game){ ytLoaded=true; return; }
+  try{
+    const raw = await ytgame.game.loadData();
+    if(raw){
+      const data=JSON.parse(raw);
+      if(data && typeof data==='object') ytSave={...ytSave,...data};
+    }
+  }catch(e){}
+  ytLoaded=true;
+}
+async function ytSaveProgress(bestValue){
+  if(!window.ytgame?.game || !ytLoaded) return;
+  ytSave.best=Math.max(Number(ytSave.best)||0, Number(bestValue)||0);
+  try{ await ytgame.game.saveData(JSON.stringify(ytSave)); }catch(e){}
+}
+function ytSendScore(value){
+  try{ ytgame?.engagement?.sendScore({value:Number(value)||0}); }catch(e){}
+}
+function ytCanAudio(){ return !ytPaused && ytAudioEnabled; }
+function ytVibrate(pattern){
+  if(!ytSave.haptics || ytPaused || !navigator.vibrate) return false;
+  try{return navigator.vibrate(pattern)}catch(e){return false}
+}
+async function ytInit(){
+  if(!window.ytgame) return;
+  try{ ytgame.game.firstFrameReady(); }catch(e){}
+  try{
+    ytAudioEnabled=!!ytgame.system.isAudioEnabled();
+    ytgame.system.onAudioEnabledChange(v=>ytAudioEnabled=!!v);
+    ytgame.system.onPause(()=>{ ytPaused=true; });
+    ytgame.system.onResume(()=>{ ytPaused=false; });
+  }catch(e){}
+  await ytLoadProgress();
+  try{ ytgame.game.gameReady(); }catch(e){}
+}
+</script>
 <script>
 (() => {
   const game = document.querySelector('#game');
@@ -158,7 +206,7 @@
   const playtestMeta = document.querySelector('#playtestMeta');
 
   /*
-    V9 — Local Playtest Build (V8 gameplay unchanged)
+    Production — YouTube Playables
     V7 mechanics/director remain intact. V8 adds:
       • best-score proximity tension
       • milestone micro-feedback
@@ -174,7 +222,7 @@
   const choice=a=>a[Math.floor(Math.random()*a.length)];
 
   let score=0;
-  let best=Number(localStorage.getItem('dontTapBestV8')||0);
+  let best=Number(localStorage.getItem('dontTapBest')||0);
   let runStartBest=best;
   let state='playing';
   let command='TAP';
@@ -199,7 +247,7 @@
   let newBestAnnounced=false;
 
   // -------- V9 local telemetry --------
-  const TEST_KEY='dontTapV9Playtest';
+  const TEST_KEY='dontTapPlayables';
   const sessionId=(crypto?.randomUUID?.() || ('s_'+Date.now()+'_'+Math.random().toString(36).slice(2)));
   const sessionStartedAt=new Date().toISOString();
   let runId=1;
@@ -208,9 +256,24 @@
   let currentRoundLog=null;
   let lastDeathAt=null;
   let totalRetries=0;
+  let tutorialActive=true;
+  let tutorialStep=0;
+  let tutorialTimer=0;
+  let tutorialWaitSwitched=false;
+  let commandPosition='center';
+  let waitTapPosition='center';
+  let waitPositionChanged=false;
+  let anomalyActive=false;
+  let anomalyTimer=0;
+  let anomalyCountThisRun=0;
+  let lastAnomalyScore=-999;
+  let anomalyName=null;
+  let anomalyStartedAt=0;
+  let anomalyExpectedRT=null;
+  let anomalyAwaitingTap=false;
 
   const telemetry={
-    schema:'dont-tap-playtest-v9',
+    schema:'dont-tap-playables',
     version:1,
     sessionId,
     startedAt:sessionStartedAt,
@@ -428,9 +491,9 @@
   }
 
   const patternBank=[
-    {name:'momentum',tags:['dont'],seq:['TAP','TAP','TAP','TAP','DONT']},
+    {name:'momentum',tags:['dont'],seq:['TAP','TAP','TAP','DONT','TAP','DONT']},
     {name:'momentum-short',tags:['dont'],seq:['TAP','TAP','TAP','DONT']},
-    {name:'freeze',tags:['lateTap'],seq:['DONT','DONT','DONT','TAP']},
+    {name:'freeze',tags:['lateTap'],seq:['DONT','DONT','TAP','DONT','TAP']},
     {name:'freeze-short',tags:['lateTap'],seq:['DONT','DONT','TAP']},
     {name:'switch',tags:['earlyWait'],seq:['TAP','DONT','WAIT','TAP']},
     {name:'switch-2',tags:['earlyWait'],seq:['DONT','TAP','WAIT','DONT']},
@@ -441,6 +504,16 @@
   ];
 
   function choosePattern() {
+    // At high skill, increase task-switch density instead of simply crushing deadlines.
+    if(score>=60 && Math.random() < (score>=80 ? .72 : .52)){
+      const p=highSkillPattern();
+      currentPattern=p;
+      currentPatternStep=0;
+      queue=[...p.seq];
+      director.lastPatternName=p.name;
+      return;
+    }
+
     // Revenge patterns return later, never immediately after death.
     if(revengePattern && score>=revengeEligibleAt && director.phase==='trap' && Math.random()<.48) {
       currentPattern=revengePattern;
@@ -494,6 +567,30 @@
     if(!queue.length)choosePattern();
     currentPatternStep++;
     return queue.shift();
+  }
+
+
+  function difficultyTier(){
+    if(score>=80)return 'survival';
+    if(score>=60)return 'expert';
+    if(score>=40)return 'hard';
+    if(score>=20)return 'normal+';
+    return 'normal';
+  }
+
+  function highSkillPattern(){
+    const expert=[
+      {name:'expert-switch',tags:['earlyWait','dont'],seq:['TAP','TAP','DONT','TAP','WAIT','TAP','DONT']},
+      {name:'expert-freeze',tags:['lateTap','dont'],seq:['DONT','TAP','DONT','DONT','TAP','WAIT','TAP']},
+      {name:'expert-mixed',tags:['earlyWait'],seq:['WAIT','TAP','TAP','DONT','WAIT','TAP','DONT']},
+      {name:'expert-reversal',tags:['dont'],seq:['TAP','DONT','TAP','TAP','DONT','WAIT','TAP']}
+    ];
+    const survival=[
+      {name:'survival-switch',tags:['earlyWait','dont'],seq:['TAP','DONT','WAIT','TAP','DONT','TAP','WAIT','DONT']},
+      {name:'survival-freeze',tags:['lateTap','dont'],seq:['DONT','DONT','TAP','WAIT','TAP','DONT','TAP','DONT']},
+      {name:'survival-mixed',tags:['earlyWait'],seq:['WAIT','TAP','DONT','TAP','WAIT','TAP','TAP','DONT']}
+    ];
+    return choice(score>=80?survival:expert);
   }
 
   // -------- timings --------
@@ -568,6 +665,275 @@
     }
   }
 
+
+
+
+  // -------- awareness anomaly system --------
+  // Rare, truthful interruptions based on the player's own measured behaviour.
+  // They never impersonate sensors/camera access and are intentionally sparse.
+  function anomalyEligible(){
+    if(anomalyActive || tutorialActive || state!=='playing')return false;
+    if(score<35 || anomalyCountThisRun>=3)return false;
+    if(score-lastAnomalyScore<18)return false;
+    const chance = score>=100 ? .10 : score>=80 ? .075 : score>=60 ? .055 : .035;
+    return Math.random()<chance;
+  }
+
+  function anomalyPool(){
+    const tap=median(model.tapRTs,390);
+    const pool=[];
+    if(model.tapRTs.length>=4 && score>=35)pool.push('mirrorRT');
+    if(model.tapRTs.length>=6 && score>=55)pool.push('gettingFaster');
+    if(score>=65)pool.push('longWait');
+    if(model.tapRTs.length>=8 && score>=75)pool.push('proveMeWrong');
+    if(score>=90)pool.push('calmDown');
+    return pool;
+  }
+
+  function logAnomaly(name,extra={}){
+    try{
+      sessionData.anomalies=sessionData.anomalies||[];
+      sessionData.anomalies.push({
+        runId,score,name,atMs:Math.round(performance.now()-sessionStartedAt),...extra
+      });
+      persistSession();
+    }catch(e){}
+  }
+
+  function finishAnomaly(delay=420){
+    clearTimeout(anomalyTimer);
+    anomalyAwaitingTap=false;
+    anomalyActive=false;
+    anomalyName=null;
+    setTimeout(()=>newRound(),delay);
+  }
+
+  function showAnomalyText(text){
+    fill.style.height='0%';
+    fill.style.opacity='0';
+    setCommandPosition('center');
+    commandEl.innerHTML=text;
+  }
+
+  function startAnomaly(){
+    const pool=anomalyPool();
+    if(!pool.length)return false;
+    anomalyActive=true;
+    anomalyCountThisRun++;
+    lastAnomalyScore=score;
+    anomalyName=choice(pool);
+    anomalyStartedAt=performance.now();
+    cancelAnimationFrame(raf);
+    clearTimeout(anomalyTimer);
+    fill.style.height='0%';
+    fill.style.opacity='0';
+
+    const tapMedian=Math.round(median(model.tapRTs,390));
+    logAnomaly(anomalyName,{tapMedian});
+
+    if(anomalyName==='mirrorRT'){
+      showAnomalyText(tapMedian+'ms');
+      anomalyTimer=setTimeout(()=>{
+        showAnomalyText("I'M LEARNING YOU.");
+        anomalyTimer=setTimeout(()=>finishAnomaly(260),850);
+      },720);
+      return true;
+    }
+
+    if(anomalyName==='gettingFaster'){
+      showAnomalyText("YOU'RE<br>GETTING FASTER.");
+      anomalyTimer=setTimeout(()=>finishAnomaly(300),1050);
+      return true;
+    }
+
+    if(anomalyName==='longWait'){
+      showAnomalyText('WAIT');
+      anomalyTimer=setTimeout(()=>{
+        showAnomalyText('WHY ARE YOU<br>STILL WAITING?');
+        anomalyTimer=setTimeout(()=>{
+          showAnomalyText('TAP.');
+          anomalyAwaitingTap=true;
+          anomalyStartedAt=performance.now();
+        },950);
+      },3200);
+      return true;
+    }
+
+    if(anomalyName==='proveMeWrong'){
+      anomalyExpectedRT=tapMedian;
+      showAnomalyText('I GIVE YOU<br>'+tapMedian+'ms.');
+      anomalyTimer=setTimeout(()=>{
+        showAnomalyText('TAP');
+        anomalyAwaitingTap=true;
+        anomalyStartedAt=performance.now();
+      },1050);
+      return true;
+    }
+
+    if(anomalyName==='calmDown'){
+      showAnomalyText('CALM DOWN.');
+      anomalyTimer=setTimeout(()=>{
+        showAnomalyText('TAP');
+        anomalyAwaitingTap=true;
+        anomalyStartedAt=performance.now();
+      },900);
+      return true;
+    }
+    return false;
+  }
+
+  function handleAnomalyTap(){
+    if(!anomalyActive)return false;
+    if(!anomalyAwaitingTap){
+      // During the "aware" text, taps do nothing; don't turn a surprise into an unfair death.
+      return true;
+    }
+    const rt=Math.round(performance.now()-anomalyStartedAt);
+    anomalyAwaitingTap=false;
+
+    if(anomalyName==='proveMeWrong'){
+      const won=rt<anomalyExpectedRT;
+      logAnomaly('proveMeWrongResult',{reactionTime:rt,target:anomalyExpectedRT,won});
+      showAnomalyText(won?'GOOD.':'I KNEW IT.');
+      tone(won?720:240,.06,.018,won?'sine':'square');
+      finishAnomaly(650);
+      return true;
+    }
+
+    logAnomaly(anomalyName+'Tap',{reactionTime:rt});
+    successSound('TAP');
+    finishAnomaly(260);
+    return true;
+  }
+
+  // -------- spatial command system --------
+  const POSITION_STYLES={
+    center:{left:'50%',top:'50%',transform:'translate(-50%,-50%)'},
+    top:{left:'50%',top:'28%',transform:'translate(-50%,-50%)'},
+    bottom:{left:'50%',top:'72%',transform:'translate(-50%,-50%)'},
+    left:{left:'24%',top:'50%',transform:'translate(-50%,-50%)'},
+    right:{left:'76%',top:'50%',transform:'translate(-50%,-50%)'}
+  };
+
+  function setCommandPosition(pos){
+    const p=POSITION_STYLES[pos]||POSITION_STYLES.center;
+    commandPosition=pos;
+    commandEl.style.position='absolute';
+    commandEl.style.left=p.left;
+    commandEl.style.top=p.top;
+    commandEl.style.transform=p.transform;
+    commandEl.style.width='max-content';
+    commandEl.style.maxWidth='62%';
+    commandEl.style.textAlign='center';
+  }
+
+  function chooseCommandPosition(){
+    if(score<20)return 'center';
+    const r=Math.random();
+    if(score<40){
+      if(r<.80)return 'center';
+    }else if(score<60){
+      if(r<.55)return 'center';
+    }else if(score<80){
+      if(r<.30)return 'center';
+    }
+    return choice(['top','bottom','left','right']);
+  }
+
+  function chooseWaitTapPosition(waitPos){
+    // Spatial surprise ramps in later than ordinary command movement.
+    let chance=0;
+    if(score>=80)chance=.58;
+    else if(score>=60)chance=.42;
+    else if(score>=40)chance=.26;
+    else if(score>=20)chance=.10;
+
+    if(Math.random()>=chance)return waitPos;
+    return choice(['center','top','bottom','left','right'].filter(p=>p!==waitPos));
+  }
+
+  function spatialReactionAllowance(){
+    // A changed WAIT→TAP location requires visual re-orienting; don't punish it
+    // as though it were a same-location reaction.
+    return waitPositionChanged ? 130 : 0;
+  }
+
+  // -------- first-session tutorial --------
+  function showTutorialStep(){
+    cancelAnimationFrame(raf);
+    setCommandPosition('center');
+    clearTimeout(tutorialTimer);
+    fill.style.height='0%';
+    fill.style.opacity='1';
+    scoreEl.textContent='';
+    if(bestGhost){bestGhost.textContent='';bestGhost.style.opacity='0';}
+
+    if(tutorialStep===0){
+      commandEl.textContent='TAP';
+      // No deadline. First touch teaches the interaction; it is not telemetry.
+    } else if(tutorialStep===1){
+      commandEl.innerHTML="DON'T<br>TAP";
+      fill.style.opacity='0';
+      tutorialTimer=setTimeout(()=>{
+        if(!tutorialActive || tutorialStep!==1)return;
+        tutorialStep=2;
+        showTutorialStep();
+      },1500);
+    } else if(tutorialStep===2){
+      tutorialWaitSwitched=false;
+      commandEl.textContent='WAIT';
+      tutorialTimer=setTimeout(()=>{
+        if(!tutorialActive || tutorialStep!==2)return;
+        tutorialWaitSwitched=true;
+        commandEl.textContent='TAP';
+        tone(520,.025,.012,'sine');
+        if(navigator.vibrate)ytVibrate(10);
+      },900);
+    } else {
+      tutorialActive=false;
+      scoreEl.textContent='0';
+      commandEl.textContent='';
+      setTimeout(()=>newRound(),220);
+    }
+  }
+
+  function tutorialPointer(){
+    if(tutorialStep===0){
+      tutorialStep=1;
+      successSound('TAP');
+      showTutorialStep();
+      return;
+    }
+    if(tutorialStep===1){
+      // Tapping DON'T TAP restarts that teaching step without killing a run.
+      if(navigator.vibrate)ytVibrate(35);
+      clearTimeout(tutorialTimer);
+      commandEl.innerHTML="DON'T<br>TAP";
+      tutorialTimer=setTimeout(()=>{
+        tutorialStep=2;
+        showTutorialStep();
+      },1500);
+      return;
+    }
+    if(tutorialStep===2){
+      if(tutorialWaitSwitched){
+        successSound('WAIT');
+        tutorialStep=3;
+        showTutorialStep();
+      } else {
+        if(navigator.vibrate)ytVibrate(35);
+        clearTimeout(tutorialTimer);
+        tutorialWaitSwitched=false;
+        commandEl.textContent='WAIT';
+        tutorialTimer=setTimeout(()=>{
+          tutorialWaitSwitched=true;
+          commandEl.textContent='TAP';
+          tone(520,.025,.012,'sine');
+        },900);
+      }
+    }
+  }
+
   // -------- run psychology --------
   function updateBestGhost() {
     if(!bestGhost)return;
@@ -595,11 +961,11 @@
       newBestAnnounced=true;
       pulseScore(1.28,220);
       newBestSound();
-      if(navigator.vibrate)navigator.vibrate([12,30,12]);
+      if(navigator.vibrate)ytVibrate([12,30,12]);
     } else if(score>0 && score%10===0){
       pulseScore(1.18,170);
       milestoneSound();
-      if(navigator.vibrate)navigator.vibrate([8,22,8]);
+      if(navigator.vibrate)ytVibrate([8,22,8]);
     }
     updateBestGhost();
   }
@@ -614,6 +980,14 @@
       scoreBefore:score,
       command,
       pattern:currentPattern?.name || 'opening',
+      patternStep:currentPattern ? currentPatternStep : null,
+      patternLength:currentPattern?.seq?.length || null,
+      difficultyTier:difficultyTier(),
+      anomalyCountThisRun,
+      commandPosition,
+      waitTapPosition:command==='WAIT'?waitTapPosition:null,
+      switchPositionChanged:command==='WAIT'?waitPositionChanged:false,
+      spatialAllowanceMs:command==='WAIT'&&waitPositionChanged?130:0,
       directorPhase:director.phase,
       pressure:+model.pressure.toFixed(3),
       duration:Math.round(duration),
@@ -631,6 +1005,12 @@
   function finishRoundTelemetry(result,reactionMs=null){
     if(!currentRoundLog || currentRoundLog.result)return;
     currentRoundLog.result=result;
+    currentRoundLog.patternCompleted=!!(
+      result==='success' &&
+      currentRoundLog.patternStep &&
+      currentRoundLog.patternLength &&
+      currentRoundLog.patternStep>=currentRoundLog.patternLength
+    );
     currentRoundLog.elapsed=Math.round(performance.now()-start);
     if(Number.isFinite(reactionMs))currentRoundLog.reactionTime=Math.round(reactionMs);
     if(result==='fail'){
@@ -681,7 +1061,7 @@
       waitTapStartedAt=now;
       commandEl.textContent='TAP';
       tone(520+Math.min(score,100)*.5,.025,.012,'sine');
-      if(navigator.vibrate)navigator.vibrate(10);
+      if(navigator.vibrate)ytVibrate(10);
     }
 
     if(progress>=1){
@@ -710,7 +1090,7 @@
     successSound(completedCommand);
     runFeedbackAfterSuccess();
     advanceDirector();
-    if(navigator.vibrate)navigator.vibrate(7);
+    if(navigator.vibrate)ytVibrate(7);
     newRound();
   }
 
@@ -723,7 +1103,7 @@
 
   function primaryDeathText() {
     if(failReason==='earlyWait'&&Number.isFinite(failDelta))return Math.round(failDelta)+'ms EARLY';
-    if((failReason==='lateTap'||failReason==='lateWait')&&Number.isFinite(failDelta))return Math.round(failDelta)+'ms LATE';
+    if(failReason==='lateTap'||failReason==='lateWait')return 'TOO SLOW';
     if(failReason==='dont')return 'YOU TAPPED.';
     return 'FAILED';
   }
@@ -754,11 +1134,13 @@
 
     if(score>best){
       best=score;
-      localStorage.setItem('dontTapBestV8',String(best));
+      ytSendScore(best);
+      ytSaveProgress(best);
+      localStorage.setItem('dontTapBest',String(best));
     }
 
     failSound();
-    if(navigator.vibrate)navigator.vibrate([35,35,60]);
+    if(navigator.vibrate)ytVibrate([35,35,60]);
 
     finalScore.textContent=score;
     if(deathDetail){
@@ -786,6 +1168,13 @@
     persistTelemetry(false);
 
     score=0;
+    clearTimeout(anomalyTimer);
+    anomalyActive=false;
+    anomalyAwaitingTap=false;
+    anomalyName=null;
+    anomalyCountThisRun=0;
+    lastAnomalyScore=-999;
+    setCommandPosition('center');
     runNumber++;
     runId++;
     roundIndex=0;
@@ -814,6 +1203,18 @@
     e.preventDefault();
     audio(); // unlock WebAudio on first user gesture
     const now=performance.now();
+
+    if(ytPaused)return;
+
+    if(anomalyActive){
+      handleAnomalyTap();
+      return;
+    }
+
+    if(tutorialActive){
+      tutorialPointer();
+      return;
+    }
 
     if(state==='over'){
       if(now>=ignorePointerUntil)restart();
@@ -844,18 +1245,19 @@
   },{passive:false});
 
   window.addEventListener('pagehide',()=>persistTelemetry(true));
-  document.addEventListener('visibilitychange',()=>{
-    if(document.hidden&&state==='playing'){
-      failReason='';
-      failDelta=null;
-      fail();
-    }
-  });
-
-  runStartBest=best;
+runStartBest=best;
   resetDirector();
-  newRound();
+  ytInit();
+  showTutorialStep();
 })();
+</script>
+
+<button id="hapticToggle" type="button">HAPTIC ON</button>
+<script>
+const hb=document.getElementById('hapticToggle');
+function refreshHaptic(){hb.textContent=ytSave.haptics?'HAPTIC ON':'HAPTIC OFF'}
+hb.addEventListener('click',e=>{e.stopPropagation();ytSave.haptics=!ytSave.haptics;refreshHaptic();ytSaveProgress(window.best||0)});
+refreshHaptic();
 </script>
 </body>
 </html>
